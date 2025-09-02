@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-scripts
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mysqldb-mgr-istio.labels" . | nindent 4 }}
+data:
+  init-mysql.sh: |
+    #!/bin/bash
+    set -ex
+    
+    # 根据主机名确定节点索引
+    POD_INDEX="${HOSTNAME##*-}"
+    SERVER_ID=$((10 + POD_INDEX))
+    # POD_FQDN="${HOSTNAME}.mysqldb.mysqldb.svc.cluster.local"
+    
+    # 生成节点特定配置
+    mkdir -p /etc/mysql/conf.d
+    cat <<EOF > /etc/mysql/conf.d/server-id.cnf
+    [mysqld]
+    server_id=${SERVER_ID}
+    # 使用 FQDN(<pod-name>.<service-name>.<namespace>.svc.cluster.local) 而非 IP
+    report_host=${HOSTNAME}.mysqldb.mysqldb.svc.cluster.local # 强制 MGR 识别 FQDN
+    # report_host=${POD_FQDN}
+    EOF
+    
+    # 设置目录权限
+    chown -R 999:999 /etc/mysql

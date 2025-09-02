@@ -1,0 +1,176 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.service.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mysqldb-mgr.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ .Values.service.name }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mysqldb-mgr.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mysqldb-mgr.selectorLabels" . | nindent 8 }}
+    spec:
+      # 临时配置
+      # 添加亲和性配置
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100  # 高权重优先调度到 node1
+            preference:
+              matchExpressions:
+              - key: kubernetes.io/hostname  # 使用主机名标签
+                operator: In
+                values:
+                - node1  # 请替换为实际的节点名称
+          - weight: 50   # 较低权重作为备选
+            preference:
+              matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - node2  # 请替换为实际的节点名称
+        podAntiAffinity:
+          # preferredDuringSchedulingIgnoredDuringExecution: 软策略，尽量满足
+          # requiredDuringSchedulingIgnoredDuringExecution: 硬策略，必须满足
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              # matchLabels:
+              #   app.kubernetes.io/instance: mysqldb
+              matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                - {{ include "mysqldb-mgr.name" . }}
+              - key: app.kubernetes.io/instance
+                operator: In
+                values:
+                - {{ .Release.Name }} # .Release.Name是 Helm 的内置对象，它代表当前发布的名称（即你在 helm install时指定的发布名称）。
+            topologyKey: kubernetes.io/hostname # 指定互斥的范围是“主机名”，即不能在同一节点
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "3"
+          - name: single-request-reopen
+          - name: timeout
+            value: "5"
+          - name: attempts
+            value: "10"
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 999
+      
+      initContainers:
+      - name: init-mysql
+        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["bash", "-c", "/scripts/init-mysql.sh && chown -R 999:999 /etc/mysql"]
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        volumeMounts:
+        - name: dynamic-config
+          mountPath: /etc/mysql
+        - name: mysql-scripts
+          mountPath: /scripts
+      
+      - name: load-config
+        image: busybox:1.35
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ['sh', '-c', 'mkdir -p /etc/mysql && cp /configs/* /etc/mysql/']
+        volumeMounts:
+        - name: dynamic-config
+          mountPath: /etc/mysql
+        - name: mysql-config
+          mountPath: /configs
+      
+      containers:
+      - name: mysql
+        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            /docker-entrypoint-initdb.d/init-db.sh
+            sleep infinity
+        ports:
+        - name: mysql
+          containerPort: {{ .Values.service.port }}
+        - name: mgr
+          containerPort: {{ .Values.service.mgrPort }}
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: root-password
+        - name: REPLICATION_ACCOUNT
+          valueFrom:
+            secretKeyRef:
+              name: mysql-replica-secret
+              key: replica-account
+        - name: REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-replica-secret
+              key: replica-password
+        - name: TZ
+          value: {{ .Values.config.timezone }}
+        
+        readinessProbe:
+          exec:
+            command:
+              - mysqladmin
+              - ping
+              - -uroot
+              - -p$(MYSQL_ROOT_PASSWORD)
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        
+        volumeMounts:
+        - name: dynamic-config
+          mountPath: /etc/mysql
+        - name: init-db
+          mountPath: /docker-entrypoint-initdb.d
+        - name: database
+          mountPath: /var/lib/mysql
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+      volumes:
+      - name: dynamic-config
+        emptyDir:
+          sizeLimit: 128Mi
+      - name: mysql-config
+        configMap:
+          name: mysql-core-config
+      - name: mysql-scripts
+        configMap:
+          name: mysql-scripts
+          defaultMode: 0755
+      - name: init-db
+        configMap:
+          name: mysql-init-db
+          defaultMode: 0755
+        
+  volumeClaimTemplates:
+  - metadata:
+      name: database
+    spec:
+      accessModes: {{ .Values.storage.accessModes }}
+      resources:
+        requests:
+          storage: {{ .Values.storage.size }}

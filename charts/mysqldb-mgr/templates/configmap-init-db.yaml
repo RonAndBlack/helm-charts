@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-init-db
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mysqldb-mgr.labels" . | nindent 4 }}
+data:
+  init-db.sh: |
+    #!/bin/bash
+    set -ex
+    
+    # 根据主机名确定节点角色
+    POD_INDEX="${HOSTNAME##*-}"
+    
+    # 初始化阶段不会加载插件，但是初始化后正是启动时会正常加载。
+    if [ ! -d "/var/lib/mysql/mysql" ]; then
+      echo "初始化MySQL数据目录..."
+      mkdir -p /var/lib/mysql
+      chown -R mysql:mysql /var/lib/mysql # 将递归地将/var/lib/mysql目录的所有权改为mysql:mysql（这是MySQL服务运行的用户和组）
+      mysqld --initialize-insecure --user=mysql --datadir=/var/lib/mysql # 直接调用 mysqld 进行初始化
+      echo "数据目录初始化完成"
+    fi
+    
+    # ===== 3. 生成MGR本地地址配置=====
+    # 创建动态配置文件
+    cat <<EOF > /etc/mysql/conf.d/gr-local.cnf
+    [mysqld]
+    
+    # 仅在此步骤之后才可识别的MGR配置
+    # group_replication_local_address = "${POD_IP}:33061"
+    group_replication_local_address = "${HOSTNAME}.mysqldb.mysqldb.svc.cluster.local:33061"
+    group_replication_group_seeds = "mysqldb-0.mysqldb.mysqldb.svc.cluster.local:33061,mysqldb-1.mysqldb.mysqldb.svc.cluster.local:33061"
+
+    # 设置MGR参数
+    group_replication_group_name = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    group_replication_start_on_boot = OFF # 禁止启动时自动加入（启动后要求所有种子节点启动且能访问）
+    group_replication_single_primary_mode = OFF
+    group_replication_enforce_update_everywhere_checks = ON
+    transaction_write_set_extraction = 'XXHASH64'
+    group_replication_ip_allowlist = '10.244.0.0/16'
+    EOF
+    
+    # 验证配置存在
+    echo "=== 生成的MGR配置 ==="
+    cat /etc/mysql/conf.d/gr-local.cnf
+    echo "===================="
+    
+    # 验证MySQL用户可读
+    chown mysql:mysql /etc/mysql/conf.d/gr-local.cnf
+    
+    # 启动前等待文件系统同步（关键！）
+    sync
+    
+    # # 确保插件文件存在（组复制插件的实际路径）
+    # PLUGIN_PATH="/usr/lib64/mysql/plugin/group_replication.so"
+    # [ ! -f "$PLUGIN_PATH" ] && echo "错误：组复制插件不存在于 $PLUGIN_PATH" && exit 1
+    
+    # 启动后台进程
+    nohup docker-entrypoint.sh mysqld > /tmp/mysql_start.log 2>&1 & echo $! > /tmp/mysql.pid
+    
+    # ===== 1. 等待MySQL临时实例启动(并设置root密码) =====
+    for i in {1..30}; do
+        if mysql -uroot -e "SELECT 1" &>/dev/null; then
+            # 检测到无密码连接，设置密码
+            echo "检测到无密码root用户，正在设置密码..."
+            mysql -uroot -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';FLUSH PRIVILEGES;"
+            echo "MySQL临时实例已启动，密码设置完成"
+            break
+        elif mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SELECT 1" &>/dev/null; then
+            # 已有密码连接成功
+            echo "MySQL临时实例已启动"
+            break
+        fi
+        
+        echo "等待MySQL启动...($i/30)"
+        sleep 5
+    done
+    
+    # ===== 2. 创建复制用户 =====
+    # 仅第一个节点执行引导
+    if [ "$POD_INDEX" -eq 0 ]; then
+      # 创建复制用户
+      # 如果变量$MYSQL_ROOT_PASSWORD, $REPLICATION_ACCOUNT, $REPLICATION_PASSWORD 中包含特殊字符（比如单引号、双引号、反斜杠等），那么可能会破坏SQL语句的结构，导致语法错误或者SQL注入风险。
+      # 初始节点
+      # 检测是否已经存在集群初始化标记文件
+      if [ ! -f /var/lib/mysql/cluster_initialized.flag ]; then
+          mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
+          RESET MASTER;
+          STOP GROUP_REPLICATION;
+          
+          -- SET SQL_LOG_BIN=0;
+          CREATE USER IF NOT EXISTS '$REPLICATION_ACCOUNT'@'%' IDENTIFIED WITH mysql_native_password BY '$REPLICATION_PASSWORD';
+          -- 禁用SSL要求
+          ALTER USER '$REPLICATION_ACCOUNT'@'%' REQUIRE NONE;
+          
+          GRANT REPLICATION SLAVE, BACKUP_ADMIN, CONNECTION_ADMIN ON *.* TO '$REPLICATION_ACCOUNT'@'%';
+          FLUSH PRIVILEGES;
+          -- SET SQL_LOG_BIN=1;
+          
+          -- 引导组复制集群（初始节点执行）
+          SET GLOBAL group_replication_bootstrap_group=ON;
+          -- set global group_replication_start_on_boot = ON -- 可以在组复制停止后进行修改。
+          START GROUP_REPLICATION USER='$REPLICATION_ACCOUNT', PASSWORD='$REPLICATION_PASSWORD';
+          SET GLOBAL group_replication_bootstrap_group=OFF;
+          "
+          # 创建标记文件
+          touch /var/lib/mysql/cluster_initialized.flag
+      else
+          # 重启场景：仅安全启动组复制
+          mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
+          -- 引导组复制集群（初始节点执行）
+          SET GLOBAL group_replication_bootstrap_group=ON;
+          START GROUP_REPLICATION USER='$REPLICATION_ACCOUNT', PASSWORD='$REPLICATION_PASSWORD';
+          SET GLOBAL group_replication_bootstrap_group=OFF;
+          "
+      fi
+      # 查看SQL_LOG_BIN的值：SHOW VARIABLES LIKE 'sql_log_bin';
+    else
+      # 等待本节点就绪（测试此节点能不能与主节点IP通信？？？）
+      sleep 30
+      
+      # 其它节点加入已有集群
+      # 检测是否已经存在集群初始化标记文件
+      if [ ! -f /var/lib/mysql/cluster_initialized.flag ]; then
+          
+          mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
+          RESET MASTER;
+          STOP GROUP_REPLICATION;
+          -- set global group_replication_start_on_boot = ON -- 可以在组复制停止后进行修改。
+          -- START GROUP_REPLICATION;
+          START GROUP_REPLICATION USER='$REPLICATION_ACCOUNT', PASSWORD='$REPLICATION_PASSWORD';
+          "
+          
+          # # StatefulSet会等待第一个Pod（mysqldb-0）的就绪探针（readinessProbe）通过后，才会创建第二个Pod（mysqldb-1）
+          # for i in {1..15}; do
+          #     mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
+          #     RESET MASTER;
+          #     STOP GROUP_REPLICATION;
+          #     -- set global group_replication_start_on_boot = ON -- 可以在组复制停止后进行修改。
+          #     -- START GROUP_REPLICATION;
+          #     START GROUP_REPLICATION USER='$REPLICATION_ACCOUNT', PASSWORD='$REPLICATION_PASSWORD';
+          #     "
+          #     echo "等待初始节点创建引导组...($i/15)"
+          #     sleep 10
+          # done
+          
+          # 创建标记文件
+          touch /var/lib/mysql/cluster_initialized.flag
+      else
+          # 重启场景：仅安全启动组复制
+          mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
+          START GROUP_REPLICATION USER='$REPLICATION_ACCOUNT', PASSWORD='$REPLICATION_PASSWORD';
+          "
+      fi
+    fi
+    echo "mysql-init-db执行完毕。"
+    
+    echo "查看复制组成员"
+    mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SELECT CHANNEL_NAME,MEMBER_ID,MEMBER_HOST,MEMBER_PORT,MEMBER_STATE,MEMBER_ROLE FROM performance_schema.replication_group_members;"

@@ -1,0 +1,27 @@
+# 创建静态 PV (pv.yaml)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: database-mysqldb-00
+#   namespace: mysqldb # PV 是集群资源，无 Namespace
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain  # 防止数据被删除（原绑定的PVC删除后，该PV会处于Released状态且不能直接被新的PVC绑定使用，需要手动处理。）# 手动删除这个.spec.claimRef整个字段则可重新绑定（记得提前删除原节点上的数据）
+  hostPath:                              # hostPath 仅适用于单节点测试，生产环境建议更换
+    path: /data/mysql-00                 # 在节点上创建的目录
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: database-mysqldb-01
+#   namespace: mysqldb # PV 是集群资源，无 Namespace
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /data/mysql-01                 # 在节点上创建的目录

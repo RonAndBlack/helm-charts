@@ -1,0 +1,47 @@
+# Default values for mysql-mgr
+replicaCount: 2
+
+image:
+  repository: mysql
+  tag: "8.0"
+  pullPolicy: IfNotPresent
+
+namespace: mysqldb
+
+service:
+  name: mysqldb
+  type: ClusterIP
+  port: 3306
+  mgrPort: 33061
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1024Mi
+
+storage:
+  size: 1Gi
+  accessModes: ["ReadWriteOnce"]
+
+mysql:
+  rootPassword: "changeme"  # 强烈建议通过 --set 覆盖此值
+  replicationUser: "Rpl_Pass"
+  replicationPassword: "replpass"  # 强烈建议通过 --set 覆盖此值
+
+config:
+  groupName: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  ipAllowlist: "10.244.0.0/16"
+  timezone: "Asia/Shanghai"
+
+# 不创建 ServiceAccount
+serviceAccount:
+  create: false
+# 不创建  Ingress
+ingress:
+  enabled: false
+# 不启用 HPA
+autoscaling:
+  enabled: false

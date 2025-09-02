@@ -1,0 +1,13 @@
+apiVersion: v2
+name: mysqldb-mgr-istio
+description: "用于MySQL组复制及Istio配置的Helm Chart"
+
+# Chart可分为“应用”型或“库”型。
+# 应用型Chart是可用于打包成版本化归档文件进行部署的模板集合，库型Chart为Chart开发者提供实用工具或函数。它们作为应用Chart的依赖项被引入，从而将相关功能注入渲染流程。库型Chart不定义任何模板，因此不可直接部署
+type: application
+
+# 此处为Chart版本号。每当对Chart及其模板（包括应用版本）进行修改时，都应递增此版本号。版本号需遵循语义化版本规范（https://semver.org/）
+version: 0.1.0
+
+# 此处为所部署应用的版本号。每当对应用程序进行修改时，都应递增此版本号。版本号无需遵循语义化版本规范，但应准确反映应用程序当前使用的版本。建议为版本号添加引号
+appVersion: "1.16.0"

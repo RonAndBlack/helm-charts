@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-core-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mysqldb-mgr.labels" . | nindent 4 }}
+data:
+  my.cnf: |
+    [mysqld]
+    # 记录配置版本号
+    # loose-config_version = 1.2-mysql8.0.43 # loose-前缀允许未知选项不导致启动失败
+
+    # 动态加载插件
+    plugin_load_add='group_replication.so'
+    
+    # 路径设置
+    datadir=/var/lib/mysql
+    socket=/var/lib/mysql/mysql.sock
+    symbolic-links=0
+    
+    # 复制基础
+    # server_id=10 # 每台机器不一致，动态获取
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    
+    # 二进制日志设置
+    binlog_checksum=NONE
+    log_replica_updates=ON
+    log_bin=binlog
+    binlog_format=ROW
+    
+    # 存储引擎限制
+    disabled_storage_engines="MyISAM,BLACKHOLE,FEDERATED,ARCHIVE,MEMORY"
+    
+    # 复制元数据存储 - 这些设置不会依赖插件，可以放在初始配置
+    master_info_repository=TABLE
+    relay_log_info_repository=TABLE
+    
+    # 传统认证
+    default_authentication_plugin = mysql_native_password
+    
+    # 包含动态生成的配置（已加载MGR专用配置）
+    !includedir /etc/mysql/conf.d/
+
+    [client]
+    socket=/var/lib/mysql/mysql.sock
